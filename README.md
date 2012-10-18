@@ -1,4 +1,4 @@
-sftp_driver
+FTPS Driver
 ===========
 
-sftp driver for em_ftpd
+ftps driver for em_ftpd

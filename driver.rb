@@ -1,10 +1,12 @@
 require 'aws/s3'
 require 'yaml'
+require 'vfs'
 
 class Driver
-  def load_configuration
+  def initialize
     settings = YAML.load_file('settings.yml')
-    @config = settings['s3']	
+    @config = settings['s3']
+    @sandbox = $sandbox || './vfs_sandbox'.to_dir.destroy
   end
   
   def authenticate(username, password )
@@ -17,7 +19,8 @@ class Driver
     while (line = user_file.gets)
       user_info = line.split(',')
 	  if user_info[0] == username && user_info[1] == password
-	    user_dir_struct = File.new(username,'w+')
+	    @sandbox[username].create
+      @username = username
 	    yield true
 	    return
 	  end
@@ -38,11 +41,32 @@ class Driver
   end
   
   def change_dir(path)
-    yield false
+    @vfs = @sandbox[path]
+    yield true
   end
   
   def dir_contents(path)
-    yield []
+    files = Array.new
+    if path.split('C:/')[-1].nil? == false && path.split('C:/')[-1] != ''
+      path = './vfs_sandbox/' + path.split('C:/')[-1]
+      path = path.gsub('/C:','')
+    else
+      path = './vfs_sandbox'
+    end
+
+    @vfs = @sandbox[path]
+    puts "#######################{path}##########################"
+    #@vfs = @sandbox[@username] if path == '/' || path == 'C:/'
+    @vfs.entries.each do |d|
+      files << EM::FTPD::DirectoryItem.new(:name => d.name,
+                                         :time => Time.now,
+                                         :permissions => 777,
+                                         :owner => 1,
+                                         :group => 1,
+                                         :size => 1,
+                                         :directory =>  true)
+    end
+    yield files
   end
   
   def delete_dir(path)
@@ -58,7 +82,14 @@ class Driver
   end
   
   def make_dir(path)
-    yield false
+    if path.split('C:/')[-1]
+      path = './vfs_sandbox/' + path.split('C:/')[-1]
+      path = path.gsub('/C:','')
+    else
+      path = './vfs_sandbox'
+    end
+    @sandbox[path].create
+    yield true
   end
   
   def get_file(path)
