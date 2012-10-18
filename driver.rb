@@ -27,8 +27,8 @@ class Driver
   
   def put_file(path, tmp_file_path)
     load_configuration 
-    AWS::S3::Base.establish_connection!(:access_key_id => @config['access_key_id'], :secret_access_key => @config['secret_access_key'])
-    AWS::S3::S3Object.store(path, open(tmp_file_path), @config['bucket'])
+    AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
+    AWS::S3::S3Object.store(path, open(tmp_file_path), ENV['bucket'])
 
     yield File.size(tmp_file_path)
   end
