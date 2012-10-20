@@ -11,7 +11,7 @@ class Driver
     descriptor = File.new("dir_discripter.conf",'r')
     while(line = descriptor.gets)
       if line[0..4] == 'file_'
-        @sandbox[ line[5..-1] ].write x
+        @sandbox[ line[5..-1].strip ].write 'x'
       else
         @sandbox[line.strip].create
       end
@@ -52,12 +52,20 @@ class Driver
   def put_file_streamed(path,file_stream)
     puts "##########AWS Path #########################{path}##############################"
     path = parse_path(path)
-    file_stream.cmd_stor_streamed(path)
-    AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
-    AWS::S3::S3Object.store(path, open(path), ENV['bucket'])
+	puts "#######################################"
+	puts file_stream.inspect
+	puts "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$"
+	puts file_stream.methods.sort
+	puts "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
+  file_stream.tap do |chunk|
+    puts chunk
+  end
+  #file_stream.cmd_stor_streamed(path)
+    #AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
+    #AWS::S3::S3Object.store(path, file_stream.tap, ENV['bucket'])
     @sandbox[path].write 'x'
     update_descriptor('file_'+path)
-    yield File.size(tmp_file_path)
+    yield 100
   end
   
   def bytes(path)
