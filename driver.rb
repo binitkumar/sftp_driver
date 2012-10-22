@@ -8,7 +8,7 @@ class Driver
     @config = settings['s3']
     @sandbox = $sandbox || './sandbox'.to_dir.destroy
 
-    descriptor = File.new("dir_discripter.conf",'r')
+    descriptor = Filea.new("dir_discripter.conf",'r')
     while(line = descriptor.gets)
       if line[0..4] == 'file_'
         @sandbox[ line[5..-1].strip ].write 'x'
@@ -16,6 +16,7 @@ class Driver
         @sandbox[line.strip].create
       end
     end
+    AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
   end
   
   def authenticate(username, password )
@@ -40,9 +41,7 @@ class Driver
   end
   
   def put_file(path, tmp_file_path)
-    puts "##########AWS Path #########################{path}##############################"
     path = parse_path(path)
-    AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
     AWS::S3::S3Object.store(path, open(tmp_file_path), ENV['bucket'])
     @sandbox[path].write 'x'
     update_descriptor('file_'+path)
@@ -50,22 +49,17 @@ class Driver
   end
 
   def put_file_streamed(path,file_stream)
-    puts "##########AWS Path #########################{path}##############################"
     path = parse_path(path)
-	puts "#######################################"
-	puts file_stream.inspect
-	puts "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$"
-	puts file_stream.methods.sort
-	puts "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
-  file_stream.tap do |chunk|
-    puts chunk
-  end
-  #file_stream.cmd_stor_streamed(path)
-    #AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
-    #AWS::S3::S3Object.store(path, file_stream.tap, ENV['bucket'])
+    File.open(path, "ab+") do |f|
+      f.write(file_stream.data)
+    end
+
+    file_size = File.open(path).size
+
+    AWS::S3::S3Object.store(path, open(path), ENV['bucket'])
     @sandbox[path].write 'x'
     update_descriptor('file_'+path)
-    yield 100
+    yield file_size
   end
   
   def bytes(path)
@@ -89,7 +83,7 @@ class Driver
       yield []
     else
       @vfs.entries.each do |d|
-        files << EM::FTPD::DirectoryItem.new(:name => d.name,
+        filese << EM::FTPD::DirectoryItem.new(:name => d.name,
                               :time => Time.now,
                               :permissions => 777,
                               :owner => @username,
@@ -104,25 +98,42 @@ class Driver
   def delete_dir(path)
     path = parse_path(path)
     update_descriptor(path,'delete')
+    @sandbox[path].entries.each do |file|
+      if AWS::S3::S3Object.find(file,ENV['bucket'])
+        AWS::S3::S3Object.delete(file, ENV['bucket'])
+      end
+      update_descriptor(file,'delete')
+    end
     @sandbox[path].destroy
     yield true
   end
   
   def delete_file(path)
     path = parse_path(path)
+    if AWS::S3::S3Object.find(path,ENV['bucket'])
+      AWS::S3::S3Object.delete(path, ENV['bucket'])
+    end
     update_descriptor('file_' + path,'delete')
     @sandbox[path].destroy
     yield true
   end
   
   def rename(from_path, to_path)
-    yield false
+    from_path = parse_path(from_path)
+    to_path = parse_path(to_path)
+    if AWS::S3::S3Object.find(from_path,ENV['bucket'])
+      AWS::S3::S3Object.rename(from_path,to_path, ENV['bucket'])
+      from_path = 'file_' + from_path
+      to_path = 'file_' + to_path
+    end
+    update_descriptor(from_path,to_path,'delete')
+    @sandbox[from_path].destroy
+    @sandbox[to_path].create
+    yield true
   end
   
   def make_dir(path)
-    puts "###############aaaaaaaaaaaaa#####################{path}###################"
     path = parse_path(path)
-    puts "###############bbbbbbbbbbbbb#####################{path}###################"
     update_descriptor(path)
     @sandbox[path].create
     yield true
@@ -130,7 +141,6 @@ class Driver
   
   def get_file(path)
     path = parse_path(path)
-    AWS::S3::Base.establish_connection!(:access_key_id => ENV['access_key_id'], :secret_access_key => ENV['secret_access_key'])
     file = AWS::S3::S3Object.find(path, ENV['bucket'])
     yield file.value
   end
@@ -154,11 +164,28 @@ class Driver
 
     if method == 'create'
       descriptor.puts(path)
-    elsif method == 'delete'
-
-    elseif method == 'rename'
-
+    else
+      file_list = Array.new
+      if method == 'delete'
+        descriptor.each do |line|
+         if line.chomp != path.chomp
+           file_list.push line
+         end
+        end
+        if method == 'rename'
+          descriptor.each do |line|
+            if line.chomp == path.chomp
+              file_list.push dest_path
+            end
+          end
+        end
+        descriptor.close
+        updated_descriptor = File.new("dir_discripter.conf","w")
+        file_list.each do |line|
+          updated_descriptor.puts line
+        end
+        updated_descriptor.close
+      end
     end
-
   end
 end
