@@ -1,20 +1,23 @@
 require 'aws/s3'
 require 'yaml'
 require 'vfs'
+require 'pathname'
+require "em-ftpd"
 
 class Driver
-  def initialize
+  def initialize(aws_object = AWS::S3::S3Object, dir_descriptor = 'dir_descriptor.conf' )
 
     #loading configuration
     settings = YAML.load_file('settings.yml')
     @config = settings['s3']
 
+    @aws_object = aws_object
+
     #Creating virtual directory sandbox
     @sandbox = $sandbox || './sandbox'.to_dir.destroy
     @sandbox.create
 
-    @descriptor_file = 'dir_descriptor.conf'
-    @descriptor_file = 'test_dir_descriptor.conf' if $mode == 'test'
+    @descriptor_file = dir_descriptor
 
     #loading previously created file and directory
     descriptor = File.new(@descriptor_file,'r')
@@ -64,13 +67,7 @@ class Driver
   #To place non-streamed file on AWS Server
   def put_file(path, tmp_file_path)
     path = parse_path(path)
-    if $mode != 'test'
-      AWS::S3::S3Object.store(path, open(tmp_file_path), ENV['bucket']) if $mode != 'test'
-    else
-      #For unit test case only
-      $virtual_aws['path'] = path
-      $virtual_aws['bucket'] = ENV['bucket']
-    end
+    @aws_object.store(path, open(tmp_file_path), ENV['bucket'])   if $mode != 'test'
     #Updating sandbox for file
     @sandbox[path].write 'x'
 
@@ -82,22 +79,19 @@ class Driver
   #To place streamed file on aws server
   def put_file_streamed(path,file_stream)
     path = parse_path(path)
+    dir_address = Pathname(path).parent.to_s
+    @sandbox[dir_address].create
 
     #Temprory hosting the file on virtual space
     File.open(path, 'ab+') do |f|
       f.write(file_stream.data)
     end
 
-    file_size = File.open(path).size
+
+    file_size = File.size(path)
 
     #Posting the streamed file to aws
-    if $mode != 'test'
-      AWS::S3::S3Object.store(path, open(path), ENV['bucket'])
-    else
-      #For unit test case only
-      $virtual_aws['path'] = path
-      $virtual_aws['bucket'] = ENV['bucket']
-    end
+    @aws_object.store(path, open(path), ENV['bucket'])  if $mode != "test"
 
     #overwriting the file with zero byte file
     @sandbox[path].write 'x'
@@ -107,19 +101,22 @@ class Driver
   
   def bytes(path)
     path = parse_path(path)
-    if AWS::S3::S3Object.exist?(path,ENV['bucket'])
-      yield AWS::S3::S3Object.find(path,ENV['bucket'])['content-length']
+    if @aws_object.exists?(path,ENV['bucket'])
+      yield @aws_object.find(path,ENV['bucket'])['content-length']
       return
     end
     yield nil
   end
   
   def change_dir(path)
-    permission_pattern = /@username/
-    if permission_pattern.match(path).nil? == false
-      yield false
-    else
+    path = parse_path(path)
+    permission_pattern = /#{@username}/
+    if path.match(permission_pattern).nil? == false
       yield true
+      return
+    else
+      yield false
+      return
     end
   end
 
@@ -136,11 +133,11 @@ class Driver
       @vfs.entries.each do |d|
         #converting all files to event machine format to match em-ftpd required format
         files << EM::FTPD::DirectoryItem.new(:name => d.name,
-                              :time => Time.now,
+                              :time => d.created_at,
                               :permissions => 777,
                               :owner => @username,
                               :group => 1,
-                              :size => 1,
+                              :size => ( @aws_object.exists?(d.name,ENV['bucket']) ? @aws_object.find(d.name,ENV['bucket'])['content-length'] : 0 ),
                               :directory => d.dir? ? true : false)
         end
         yield files
@@ -152,10 +149,11 @@ class Driver
     path = parse_path(path)
     update_descriptor(path,'delete')
     @sandbox[path].entries.each do |file|
-
-      #Deleting all the files from aws server
-      if AWS::S3::S3Object.find(file,ENV['bucket'])
-        AWS::S3::S3Object.delete(file, ENV['bucket'])
+      if file.dir? == false
+        #Deleting all the files from aws server
+        if @aws_object.find(file,ENV['bucket'])
+          @aws_object.delete(file, ENV['bucket'])
+        end
       end
       update_descriptor(file,'delete')
     end
@@ -168,8 +166,8 @@ class Driver
   def delete_file(path)
     path = parse_path(path)
     #Deletion of file from aws server
-    if AWS::S3::S3Object.find(path,ENV['bucket'])
-      AWS::S3::S3Object.delete(path, ENV['bucket'])
+    if @aws_object.find(path,ENV['bucket'])
+      @aws_object.delete(path, ENV['bucket'])
     end
     update_descriptor('file_' + path,'delete')
 
@@ -182,14 +180,21 @@ class Driver
   def rename(from_path, to_path)
     from_path = parse_path(from_path)
     to_path = parse_path(to_path)
-    if AWS::S3::S3Object.find(from_path,ENV['bucket'])
-      AWS::S3::S3Object.rename(from_path,to_path, ENV['bucket'])
-      from_path = 'file_' + from_path
-      to_path = 'file_' + to_path
+
+    if @aws_object.find(from_path,ENV['bucket'])
+      @aws_object.rename(from_path,to_path, ENV['bucket'])
     end
-    update_descriptor(from_path,to_path,'delete')
-    @sandbox[from_path].destroy
-    @sandbox[to_path].create
+    if @sandbox[from_path].dir?
+      @sandbox[from_path].destroy
+      @sandbox[to_path].create
+    else
+      @sandbox[from_path].destroy
+      @sandbox[to_path].write 'x'
+    end
+    from_path = 'file_' + from_path
+    to_path = 'file_' + to_path
+    update_descriptor(from_path,'rename',to_path)
+
     yield true
   end
 
@@ -204,12 +209,42 @@ class Driver
   #Download file from server
   def get_file(path)
     path = parse_path(path)
-    if $mode != 'test'
-      file = AWS::S3::S3Object.find(path, ENV['bucket'])
+    aws_file = @aws_object.find(path, ENV['bucket'])
+    yield aws_file.value
+  end
+
+  #Method to update directory descriptor
+  def update_descriptor(path,method='create',dest_path=nil)
+    descriptor = File.new(@descriptor_file,'a+')
+
+    if method == 'create'
+      descriptor.puts(path)
+      descriptor.close
     else
-      file = File.new(path)
+      file_list = Array.new
+      if method == 'delete'
+        descriptor.each do |line|
+          if line.chomp != path.chomp
+            file_list.push line
+          end
+        end
+      end
+      if method == 'rename'
+        descriptor.each do |line|
+          if line.chomp == path.chomp
+            file_list.push dest_path
+          else
+            file_list.push line
+          end
+        end
+      end
+      descriptor.close
+      updated_descriptor = File.new(@descriptor_file,"w")
+      file_list.each do |line|
+        updated_descriptor.puts line
+      end
+      updated_descriptor.close
     end
-    yield file.value
   end
 
 
@@ -229,35 +264,5 @@ class Driver
     path
   end
 
-  #Internal method to update directory descriptor
-  def update_descriptor(path,method='create',dest_path=nil)
-    descriptor = File.new(@descriptor_file,'a+')
 
-    if method == 'create'
-      descriptor.puts(path)
-      descriptor.close
-    else
-      file_list = Array.new
-      if method == 'delete'
-        descriptor.each do |line|
-         if line.chomp != path.chomp
-           file_list.push line
-         end
-        end
-        if method == 'rename'
-          descriptor.each do |line|
-            if line.chomp == path.chomp
-              file_list.push dest_path
-            end
-          end
-        end
-        descriptor.close
-        updated_descriptor = File.new(@descriptor_file,"w")
-        file_list.each do |line|
-          updated_descriptor.puts line
-        end
-        updated_descriptor.close
-      end
-    end
-  end
 end
